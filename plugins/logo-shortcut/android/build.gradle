@@ -22,4 +22,8 @@ android {
 
 dependencies {
     implementation project(':capacitor-android')
+    // capacitor-android declares androidx.core as `implementation`, so it is
+    // not visible on this module's compile classpath; declare it explicitly.
+    // Version matches Capacitor 6's androidxCoreVersion (1.12.0).
+    implementation "androidx.core:core:1.12.0"
 }

@@ -3,17 +3,16 @@ package com.integratedresults.logoshortcut;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.ShortcutInfo;
-import android.content.pm.ShortcutManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Icon;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
 import android.util.Log;
 import android.webkit.WebView;
+import androidx.core.content.pm.ShortcutInfoCompat;
+import androidx.core.content.pm.ShortcutManagerCompat;
+import androidx.core.graphics.drawable.IconCompat;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -38,7 +37,7 @@ import org.json.JSONTokener;
  *   signed-in dashboard (sidebar logo) and returns its URL + company name.
  *   The web app's own code is NOT changed.
  * - When a logo URL is found, the logo is downloaded and
- *   ShortcutManager.requestPinShortcut() asks the user (system dialog) to
+ *   ShortcutManagerCompat.requestPinShortcut() asks the user (system dialog) to
  *   add the shortcut to the home screen. This happens ONCE per install
  *   (SharedPreferences flag); declining the dialog means it will not ask
  *   again until the app is reinstalled or its data is cleared.
@@ -308,19 +307,15 @@ public class LogoShortcutPlugin extends Plugin {
 
     /**
      * Asks Android to pin the shortcut. Returns true when the system shows
-     * the user the confirmation dialog.
+     * the user the confirmation dialog. Uses the AndroidX compat APIs so the
+     * plugin compiles without the framework android.graphics.Icon class.
      */
     private boolean requestPin(Bitmap bitmap, String label) {
         Context context = getContext();
         if (context == null) {
             return false;
         }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            Log.i(TAG, "Pinned shortcuts need Android 8 or newer");
-            return false;
-        }
-        ShortcutManager shortcutManager = (ShortcutManager) context.getSystemService(Context.SHORTCUT_SERVICE);
-        if (shortcutManager == null || !shortcutManager.isRequestPinShortcutSupported()) {
+        if (!ShortcutManagerCompat.isRequestPinShortcutSupported(context)) {
             Log.i(TAG, "Pinned shortcuts are not supported on this device/launcher");
             return false;
         }
@@ -329,13 +324,13 @@ public class LogoShortcutPlugin extends Plugin {
             Log.w(TAG, "No launch intent for this app");
             return false;
         }
-        ShortcutInfo info = new ShortcutInfo.Builder(context, SHORTCUT_ID)
+        ShortcutInfoCompat info = new ShortcutInfoCompat.Builder(context, SHORTCUT_ID)
                 .setShortLabel(label)
                 .setLongLabel(label)
-                .setIcon(Icon.createWithBitmap(bitmap))
+                .setIcon(IconCompat.createWithBitmap(bitmap))
                 .setIntent(launchIntent)
                 .build();
-        return shortcutManager.requestPinShortcut(info, null);
+        return ShortcutManagerCompat.requestPinShortcut(context, info, null);
     }
 
     /**
@@ -359,12 +354,8 @@ public class LogoShortcutPlugin extends Plugin {
      */
     @PluginMethod
     public void isRequestPinShortcutSupported(PluginCall call) {
-        boolean supported = false;
         Context context = getContext();
-        if (context != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            ShortcutManager shortcutManager = (ShortcutManager) context.getSystemService(Context.SHORTCUT_SERVICE);
-            supported = shortcutManager != null && shortcutManager.isRequestPinShortcutSupported();
-        }
+        boolean supported = context != null && ShortcutManagerCompat.isRequestPinShortcutSupported(context);
         JSObject ret = new JSObject();
         ret.put("supported", supported);
         call.resolve(ret);
