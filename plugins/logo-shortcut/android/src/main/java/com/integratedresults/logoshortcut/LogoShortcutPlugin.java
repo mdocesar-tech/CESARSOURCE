@@ -38,8 +38,14 @@ import org.json.JSONTokener;
  *   script in the WebView that looks for the company logo image on the
  *   signed-in page and returns its URL + company name. The web app's own
  *   code is NOT changed. No sidebar or nav element is required: phones show
- *   no sidebar, so the logo is found from any logo-like image (or a
- *   localStorage logo value) on a signed-in page.
+ *   no sidebar, so the logo is found from any VISIBLE logo-like image on a
+ *   signed-in page. Only images that are actually visible count (zero-size
+ *   or hidden images, e.g. inside a collapsed switcher/picker, are skipped),
+ *   and a logo URL must be seen on TWO consecutive checks before a pin is
+ *   offered, so a logo that only flashes by on a transient screen can never
+ *   win. localStorage is NOT consulted: a stale stored value could belong
+ *   to another company. The label falls back to "Integrated Results" when
+ *   no company name is found next to the logo.
  * - When a logo URL is found, the logo is downloaded and
  *   ShortcutManagerCompat.requestPinShortcut() asks the user (system dialog)
  *   to add the shortcut to the home screen.
@@ -48,12 +54,14 @@ import org.json.JSONTokener;
  *   no shortcut yet gets its own pin offer under a distinct shortcut id.
  *   A company that already has a shortcut is never asked twice — including
  *   when the user switches back to it later.
+ * - The loop NEVER stops after the first pin: once a shortcut exists for
+ *   the current company (or a pin dialog has been shown), the check keeps
+ *   running on a slower 30 s cadence, and a foreground return re-checks
+ *   within seconds — so an in-app company switch (which fires no resume
+ *   of its own) is still picked up and offered its own shortcut.
  * - Failures never kill the flow silently: a failed download or an
  *   undecodable logo (e.g. SVG) is logged with the URL and the check loop
- *   keeps running; the loop also restarts whenever the app returns to the
- *   foreground, so a company switch is picked up. The loop only stops once
- *   a pin dialog has actually been shown (or the current company already
- *   has a shortcut).
+ *   keeps running.
  * - The shortcut's intent is the app's own launch intent, so tapping it
  *   opens the mobile app directly (not a browser tab).
  *
@@ -78,17 +86,25 @@ public class LogoShortcutPlugin extends Plugin {
     private static final String KEY_CREATED_LEGACY = "shortcut_created";
     private static final String KEY_LOGO_URL_LEGACY = "shortcut_logo_url";
     private static final long CHECK_INTERVAL_MS = 15000;
+    // Slower cadence once a shortcut exists for the current company (or a
+    // pin dialog has been shown): the loop keeps watching for a company
+    // switch, it just does not need to ask that often.
+    private static final long CHECK_INTERVAL_IDLE_MS = 30000;
     private static final long FIRST_CHECK_DELAY_MS = 5000;
-    private static final int MAX_ATTEMPTS = 40; // ~10 minutes of checking
+    private static final int MAX_ATTEMPTS = 40; // ~10 minutes of fast checking
     private static final int MAX_ICON_PX = 512;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private int attempts = 0;
+    private long currentIntervalMs = CHECK_INTERVAL_MS;
     private boolean loopStarted = false;
-    private boolean stopped = false;
     private boolean creating = false;
     private String creatingUrl = null;
     private String lastAttemptedUrl = null;
+    // Stability gate: a logo URL must be seen on two consecutive checks
+    // before a pin is offered for it.
+    private String lastSeenUrl = null;
+    private int consecutiveCount = 0;
 
     /**
      * Defensive logo detection, run inside the WebView. Returns a JSON string
@@ -98,10 +114,14 @@ public class LogoShortcutPlugin extends Plugin {
      * - the page is not a login/signup/register screen (hash route check),
      * - the page is not the company picker ("Select a company" — no active
      *   company yet),
-     * - an <img> whose src/alt/class mentions "logo", preferably inside a
-     *   sidebar/nav when one exists (phones show no sidebar, so it is a
-     *   bonus, never a requirement), plus a localStorage value whose key
-     *   mentions "logo".
+     * - a VISIBLE <img> whose src/alt/class mentions "logo", preferably
+     *   inside a sidebar/nav when one exists (phones show no sidebar, so it
+     *   is a bonus, never a requirement). Hidden images (zero-size bounding
+     *   rect, display:none, visibility:hidden — including hidden switcher
+     *   or picker DOM) are skipped. localStorage is deliberately NOT read:
+     *   a stored logo value can be stale or belong to another company.
+     *   The label falls back to "Integrated Results", never document.title
+     *   (the title can name a company from another context).
      */
     private static final String DETECT_JS =
         "(function(){"
@@ -112,11 +132,13 @@ public class LogoShortcutPlugin extends Plugin {
         + "if(bodyText.indexOf('Select a company')!==-1)return null;"
         + "function abs(u){try{return new URL(u,window.location.href).href;}catch(e){return null;}}"
         + "function usable(s){if(!s)return false;var x=s.toLowerCase();return x.indexOf('http://')===0||x.indexOf('https://')===0||x.indexOf('data:image')===0;}"
+        + "function isVisible(el){var r=el.getBoundingClientRect();if(!r||r.width===0||r.height===0)return false;var n=el,d=0;while(n&&d<8){var cs=null;try{cs=window.getComputedStyle(n);}catch(e){}if(!cs||cs.display==='none'||cs.visibility==='hidden')return false;n=n.parentElement;d++;}return true;}"
         + "var best=null;"
         + "function consider(src,score){if(!usable(src))return;var u=abs(src);if(!u)return;if(!best||score>best.score)best={url:u,score:score};}"
         + "var imgs=document.querySelectorAll('img');"
         + "for(var i=0;i<imgs.length;i++){"
-        + "var im=imgs[i];var src=im.getAttribute('src')||im.currentSrc||'';"
+        + "var im=imgs[i];if(!isVisible(im))continue;"
+        + "var src=im.getAttribute('src')||im.currentSrc||'';"
         + "var alt=(im.getAttribute('alt')||'').toLowerCase();"
         + "var cls=(im.getAttribute('class')||'').toLowerCase();"
         + "var score=0;"
@@ -127,7 +149,6 @@ public class LogoShortcutPlugin extends Plugin {
         + "while(p&&d<6){var t=(p.tagName||'').toLowerCase();var pc=(p.getAttribute('class')||'').toLowerCase();"
         + "if(t==='aside'||t==='nav'||pc.indexOf('sidebar')!==-1){score+=2;break;}p=p.parentElement;d++;}"
         + "if(score>0)consider(src,score);}"
-        + "try{for(var k=0;k<window.localStorage.length;k++){var key=window.localStorage.key(k)||'';var val=window.localStorage.getItem(key)||'';if(key.toLowerCase().indexOf('logo')!==-1&&usable(val))consider(val,1);}}catch(e){}"
         + "if(!best)return null;"
         + "var label='';"
         + "try{"
@@ -137,7 +158,7 @@ public class LogoShortcutPlugin extends Plugin {
         + "while(el&&dd<4){var tx=(el.textContent||'').replace(/\\s+/g,' ').trim();"
         + "if(tx&&tx.length>1&&tx.length<80){label=tx.split('Operations')[0].trim();break;}el=el.parentElement;dd++;}}"
         + "}catch(e){}"
-        + "if(!label)label=(document.title||'Integrated Results').replace(/\\s+/g,' ').trim();"
+        + "if(!label)label='Integrated Results';"
         + "return JSON.stringify({url:best.url,label:label.slice(0,30)});"
         + "}catch(e){return null;}"
         + "})()";
@@ -145,18 +166,19 @@ public class LogoShortcutPlugin extends Plugin {
     private final Runnable checkRunnable = new Runnable() {
         @Override
         public void run() {
-            if (stopped) {
-                return;
-            }
             attempts++;
             if (attempts > MAX_ATTEMPTS) {
-                Log.i(TAG, "Giving up logo detection after " + MAX_ATTEMPTS
-                        + " attempts; will retry on next resume");
-                loopStarted = false;
-                return;
+                // The fast budget is spent, but the loop NEVER stops: fall
+                // back to the slow idle cadence and keep watching, so a
+                // later company switch is still picked up.
+                attempts = 0;
+                currentIntervalMs = CHECK_INTERVAL_IDLE_MS;
+                Log.i(TAG, "No new logo after " + MAX_ATTEMPTS
+                        + " fast attempts; continuing to watch every "
+                        + (CHECK_INTERVAL_IDLE_MS / 1000) + "s");
             }
             runDetection();
-            mainHandler.postDelayed(this, CHECK_INTERVAL_MS);
+            mainHandler.postDelayed(this, currentIntervalMs);
         }
     };
 
@@ -169,16 +191,17 @@ public class LogoShortcutPlugin extends Plugin {
 
     @Override
     protected void handleOnResume() {
-        // Restart detection whenever the app returns to the foreground, so a
-        // company switch (or a previously missed logo) is picked up. A loop
-        // that is already running is left alone.
-        if (loopStarted && attempts <= MAX_ATTEMPTS && !stopped) {
-            return;
-        }
-        stopped = false;
+        // A foreground return is the moment a company switch becomes
+        // visible: check soon (the WebView needs a moment to settle), at
+        // the fast cadence, with a fresh stability gate — a logo must be
+        // seen twice in a row after the resume before a pin is offered.
         attempts = 0;
-        loopStarted = false;
-        startLoop();
+        currentIntervalMs = CHECK_INTERVAL_MS;
+        lastSeenUrl = null;
+        consecutiveCount = 0;
+        loopStarted = true;
+        mainHandler.removeCallbacks(checkRunnable);
+        mainHandler.postDelayed(checkRunnable, FIRST_CHECK_DELAY_MS);
     }
 
     private void startLoop() {
@@ -187,12 +210,6 @@ public class LogoShortcutPlugin extends Plugin {
         }
         loopStarted = true;
         mainHandler.postDelayed(checkRunnable, FIRST_CHECK_DELAY_MS);
-    }
-
-    private void haltLoop() {
-        stopped = true;
-        loopStarted = false;
-        mainHandler.removeCallbacks(checkRunnable);
     }
 
     /** Companies that already have a shortcut, as "logoUrl\u0001label" entries. */
@@ -272,7 +289,16 @@ public class LogoShortcutPlugin extends Plugin {
 
     private void onDetectionResult(String value) {
         if (value == null || "null".equals(value)) {
-            return; // Not signed in yet, or no logo found — keep checking.
+            // Not signed in yet, or no logo found — keep checking. A logo
+            // that was seen once and then disappears loses its first
+            // sighting: the stability gate needs two CONSECUTIVE checks.
+            if (lastSeenUrl != null) {
+                Log.i(TAG, "Logo no longer visible (" + lastSeenUrl
+                        + "); stability gate reset");
+                lastSeenUrl = null;
+                consecutiveCount = 0;
+            }
+            return;
         }
         try {
             Object parsed = new JSONTokener(value).nextValue();
@@ -286,9 +312,27 @@ public class LogoShortcutPlugin extends Plugin {
                 return;
             }
             Log.i(TAG, "Found company logo: " + logoUrl + " (" + label + ")");
+            // Stability gate: only trust a logo URL seen on two
+            // consecutive checks. A logo that only flashes by on a
+            // transient screen (landing page, picker, an open switcher
+            // dropdown) must never win on a single frame.
+            if (!logoUrl.equals(lastSeenUrl)) {
+                lastSeenUrl = logoUrl;
+                consecutiveCount = 1;
+                Log.i(TAG, "Logo seen once, waiting for a second consecutive sighting: " + logoUrl);
+                return;
+            }
+            consecutiveCount++;
+            if (consecutiveCount < 2) {
+                return;
+            }
             if (isCreatedFor(logoUrl, label)) {
-                Log.i(TAG, "Shortcut already exists for " + label + "; not asking again");
-                haltLoop();
+                // Already have a shortcut for this company: do NOT halt —
+                // keep watching on the slow cadence so a later switch to
+                // another company is picked up.
+                Log.i(TAG, "Shortcut already exists for " + label + "; not asking again, still watching");
+                attempts = 0;
+                currentIntervalMs = CHECK_INTERVAL_IDLE_MS;
                 return;
             }
             if (creating) {
@@ -391,7 +435,11 @@ public class LogoShortcutPlugin extends Plugin {
                         } else if (shown) {
                             Log.i(TAG, "Pin dialog shown for " + label + " (" + logoUrl + ")");
                             markCreated(logoUrl, label);
-                            haltLoop();
+                            // Never stop looking: keep watching on the slow
+                            // cadence so a later company switch is offered
+                            // its own shortcut.
+                            attempts = 0;
+                            currentIntervalMs = CHECK_INTERVAL_IDLE_MS;
                         } else {
                             // No dialog was shown (e.g. pinning unsupported):
                             // stay in the loop so a later check can retry.
