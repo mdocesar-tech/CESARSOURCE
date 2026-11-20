@@ -2,11 +2,13 @@
   "name": "saas-mobile-app",
   "version": "1.0.0",
   "private": true,
+  "scripts": {
+    "postinstall": "base64 -d assets/ir-logo.b64 > assets/icon.png && base64 -d assets/ir-logo.b64 > assets/splash.png"
+  },
   "dependencies": {
     "@capacitor/android": "^6.1.2",
     "@capacitor/core": "^6.1.2",
-    "@capacitor/ios": "^6.1.2",
-    "logo-shortcut": "file:plugins/logo-shortcut"
+    "@capacitor/ios": "^6.1.2"
   },
   "devDependencies": {
     "@capacitor/cli": "^6.1.2"
