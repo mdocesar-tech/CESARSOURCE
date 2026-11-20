@@ -12,16 +12,23 @@ the native side:
 1. Capacitor lists the plugin in `capacitor.plugins.json` (`npx cap sync
    android`) and the Bridge instantiates it eagerly at app start, so
    `LogoShortcutPlugin.load()` runs with no JavaScript call needed.
-2. `load()` starts a periodic check (every 15 s, up to ~10 min): native code
-   evaluates a defensive script in the WebView that looks for the company
-   logo image on the signed-in dashboard (sidebar logo) and returns its URL
-   plus the company name. It only runs once the user is past the login /
-   signup screens and a sidebar/nav is present.
+2. `load()` starts a periodic check (every 15 s, up to ~10 min, restarted on
+   every foreground return): native code evaluates a defensive script in the
+   WebView that looks for the company logo image on the signed-in page and
+   returns its URL plus the company name. No sidebar/nav element is required
+   — phones show no sidebar, so any logo-like image (or a localStorage logo
+   value) counts. It does not fire on the login / signup screens or on the
+   company picker ("Select a company" — no active company yet).
 3. When a logo URL is found, the logo is downloaded and
    `ShortcutManager.requestPinShortcut()` asks the user in a system dialog to
-   add the shortcut. This happens **once per install** (a SharedPreferences
-   flag). If the user declines the dialog, it will not ask again until the app
-   is reinstalled or its data is cleared.
+   add the shortcut. The shortcut follows the **active company**: every
+   company that gets a shortcut is recorded (label + logo URL), and a
+   different company gets its own pin offer under its own shortcut id. A
+   company that already has a shortcut is never asked twice, including when
+   the user switches back to it. A failed download or an undecodable logo
+   (e.g. SVG) is logged with the URL and the check loop keeps running — the
+   loop only stops once a pin dialog has actually been shown (or the current
+   company already has a shortcut).
 4. The same flow is also available from JavaScript as
    `LogoShortcut.createShortcut({ logoUrl, label })` (see `dist/plugin.js`),
    plus `isRequestPinShortcutSupported()`.
