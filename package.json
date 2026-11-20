@@ -5,7 +5,8 @@
   "dependencies": {
     "@capacitor/android": "^6.1.2",
     "@capacitor/core": "^6.1.2",
-    "@capacitor/ios": "^6.1.2"
+    "@capacitor/ios": "^6.1.2",
+    "logo-shortcut": "file:plugins/logo-shortcut"
   },
   "devDependencies": {
     "@capacitor/cli": "^6.1.2"

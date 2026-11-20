@@ -1,0 +1,1 @@
+{"capacitor":{"android":{"src":"android"}},"description":"Test plugin: creates an Android home-screen pinned shortcut carrying the signed-in company's logo, so tapping it opens the mobile app directly.","main":"dist/plugin.js","name":"logo-shortcut","types":"dist/plugin.d.ts","version":"1.0.0"}
